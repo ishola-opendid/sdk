@@ -4,7 +4,7 @@ export interface DIDDocument {
   data: {
     [key: string]: any;
   };
-  issuerDid: string;
+  issuerId: string;
   issuedAt: Date;
   subjectId: string;
   expirationDate?: Date;
