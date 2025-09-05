@@ -33,7 +33,21 @@ contract OpenDID {
         IENS(0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e);
 
     // OpenDID text record key
-    string public constant OPENDID_KEY = "opendid";
+    string public constant OPENDID_KEY = "opendid:registry";
+
+    // Address of the Filecoin claims registry contract
+    address public immutable FILECOIN_CONTRACT;
+
+    // Domain for signature verification
+    uint256 public constant CHAIN_ID = 1; // Ethereum mainnet
+
+    constructor(address _filecoinContract) {
+        require(
+            _filecoinContract != address(0),
+            "Invalid Filecoin contract address"
+        );
+        FILECOIN_CONTRACT = _filecoinContract;
+    }
 
     // Events
     event DIDClaimed(
@@ -42,34 +56,30 @@ contract OpenDID {
         string didRecord,
         address indexed claimer
     );
-    event DIDUpdated(
+
+    event ClaimMessageGenerated(
         bytes32 indexed node,
         string indexed ensName,
-        string oldRecord,
-        string newRecord,
-        address indexed updater
-    );
-    event DIDRevoked(
-        bytes32 indexed node,
-        string indexed ensName,
-        address indexed revoker
+        bytes32 indexed messageHash,
+        address claimer
     );
 
     // Errors
     error NotENSOwner(bytes32 node, address caller);
     error ResolverNotFound(bytes32 node);
-    error InvalidCID(string cid);
     error EmptyENSName();
     error DIDAlreadyExists(bytes32 node);
+    error DIDNotRegistered(bytes32 node);
+
+    // Nonces for replay protection
+    mapping(address => uint256) public nonces;
 
     /**
-     * @dev Claim a DID record for an ENS name
-     * @param ensName The ENS name (e.g., "vitalik.eth")
-     * @param cid The IPFS CID containing the DID document
+     * @dev Register a DID for an ENS name
+     * @param ensName The ENS name
      */
-    function claimDID(string calldata ensName, string calldata cid) external {
+    function registerDID(string calldata ensName) external {
         if (bytes(ensName).length == 0) revert EmptyENSName();
-        if (bytes(cid).length == 0) revert InvalidCID(cid);
 
         bytes32 node = _namehash(ensName);
 
@@ -90,26 +100,27 @@ contract OpenDID {
             revert DIDAlreadyExists(node);
         }
 
-        // Construct the DID record: "did:opendid:<cid>"
-        string memory didRecord = string(abi.encodePacked("did:opendid:", cid));
+        // Construct the record: "did:opendid:ensName"
+        string memory didRecord = string(
+            abi.encodePacked("did:opendid:", ensName)
+        );
 
         // Set the text record
         resolver.setText(node, OPENDID_KEY, didRecord);
-
         emit DIDClaimed(node, ensName, didRecord, msg.sender);
     }
 
     /**
-     * @dev Update an existing DID record
+     * @dev Generate a signed message for adding a claim to Filecoin
      * @param ensName The ENS name
-     * @param newCid The new IPFS CID
+     * @param cid The CID of the claim data on IPFS/Filecoin
+     * @return messageHash The hash that needs to be signed
      */
-    function updateDID(
+    function generateClaimMessage(
         string calldata ensName,
-        string calldata newCid
-    ) external {
+        string calldata cid
+    ) external view returns (bytes32 messageHash) {
         if (bytes(ensName).length == 0) revert EmptyENSName();
-        if (bytes(newCid).length == 0) revert InvalidCID(newCid);
 
         bytes32 node = _namehash(ensName);
 
@@ -118,31 +129,37 @@ contract OpenDID {
             revert NotENSOwner(node, msg.sender);
         }
 
-        // Get the resolver
-        address resolverAddr = ENS_REGISTRY.resolver(node);
-        if (resolverAddr == address(0)) revert ResolverNotFound(node);
+        // Check if DID exists
+        if (!hasDID(ensName)) {
+            revert DIDNotRegistered(node);
+        }
 
-        IENSResolver resolver = IENSResolver(resolverAddr);
+        // Construct the DID
+        string memory did = string(abi.encodePacked("did:opendid:", ensName));
 
-        // Get existing record for event
-        string memory oldRecord = resolver.text(node, OPENDID_KEY);
-
-        // Construct new DID record
-        string memory newRecord = string(
-            abi.encodePacked("did:opendid:", newCid)
+        // Create message hash for Filecoin contract signature
+        // This should match the format expected by DIDClaimsRegistry
+        messageHash = keccak256(
+            abi.encodePacked(
+                "Append",
+                did,
+                cid,
+                FILECOIN_CONTRACT,
+                nonces[msg.sender]
+            )
         );
 
-        // Update the text record
-        resolver.setText(node, OPENDID_KEY, newRecord);
-
-        emit DIDUpdated(node, ensName, oldRecord, newRecord, msg.sender);
+        return messageHash;
     }
 
     /**
-     * @dev Revoke a DID record (set to empty string)
+     * @dev Generate a signed message for registering DID on Filecoin (first time)
      * @param ensName The ENS name
+     * @return messageHash The hash that needs to be signed
      */
-    function revokeDID(string calldata ensName) external {
+    function generateRegistrationMessage(
+        string calldata ensName
+    ) external view returns (bytes32 messageHash) {
         if (bytes(ensName).length == 0) revert EmptyENSName();
 
         bytes32 node = _namehash(ensName);
@@ -152,16 +169,34 @@ contract OpenDID {
             revert NotENSOwner(node, msg.sender);
         }
 
-        // Get the resolver
-        address resolverAddr = ENS_REGISTRY.resolver(node);
-        if (resolverAddr == address(0)) revert ResolverNotFound(node);
+        // Check if DID exists
+        if (!hasDID(ensName)) {
+            revert DIDNotRegistered(node);
+        }
 
-        IENSResolver resolver = IENSResolver(resolverAddr);
+        // Construct the DID
+        string memory did = string(abi.encodePacked("did:opendid:", ensName));
 
-        // Clear the text record
-        resolver.setText(node, OPENDID_KEY, "");
+        // Create message hash for Filecoin contract signature
+        messageHash = keccak256(
+            abi.encodePacked(
+                "Register",
+                did,
+                FILECOIN_CONTRACT,
+                nonces[msg.sender]
+            )
+        );
 
-        emit DIDRevoked(node, ensName, msg.sender);
+        return messageHash;
+    }
+
+    /**
+     * @dev Increment nonce after successful operation (called by SDK after Filecoin transaction)
+     * @param user The user whose nonce to increment
+     */
+    function incrementNonce(address user) external {
+        // or implement a more sophisticated nonce management system
+        nonces[user]++;
     }
 
     /**
@@ -188,7 +223,7 @@ contract OpenDID {
      * @param ensName The ENS name
      * @return True if DID exists, false otherwise
      */
-    function hasDID(string calldata ensName) external view returns (bool) {
+    function hasDID(string calldata ensName) public view returns (bool) {
         if (bytes(ensName).length == 0) return false;
 
         bytes32 node = _namehash(ensName);
@@ -209,6 +244,15 @@ contract OpenDID {
      */
     function getNamehash(string calldata name) external pure returns (bytes32) {
         return _namehash(name);
+    }
+
+    /**
+     * @dev Get nonce for a user
+     * @param user The user address
+     * @return Current nonce
+     */
+    function getNonce(address user) external view returns (uint256) {
+        return nonces[user];
     }
 
     /**
@@ -257,70 +301,5 @@ contract OpenDID {
         }
 
         return node;
-    }
-
-    /**
-     * @dev Batch operations for efficiency
-     * @param ensNames Array of ENS names
-     * @param cids Array of CIDs
-     */
-    function batchClaimDID(
-        string[] calldata ensNames,
-        string[] calldata cids
-    ) external {
-        require(ensNames.length == cids.length, "Arrays length mismatch");
-
-        for (uint256 i = 0; i < ensNames.length; i++) {
-            // Use try/catch to continue on failures
-            try this.claimDID(ensNames[i], cids[i]) {
-                // Success - continue
-            } catch {
-                // Log failure but continue with next item
-                continue;
-            }
-        }
-    }
-
-    /**
-     * @dev Emergency function to check contract status
-     * @return True if contract is operational
-     */
-    function isOperational() external pure returns (bool) {
-        return address(ENS_REGISTRY) != address(0);
-    }
-}
-
-/**
- * @title OpenDIDFactory
- * @dev Factory contract for deploying OpenDID instances
- */
-contract OpenDIDFactory {
-    event OpenDIDDeployed(
-        address indexed openDIDAddress,
-        address indexed deployer
-    );
-
-    mapping(address => address[]) public userDeployments;
-    address[] public allDeployments;
-
-    function deployOpenDID() external returns (address) {
-        OpenDID openDID = new OpenDID();
-        address openDIDAddress = address(openDID);
-
-        userDeployments[msg.sender].push(openDIDAddress);
-        allDeployments.push(openDIDAddress);
-
-        emit OpenDIDDeployed(openDIDAddress, msg.sender);
-        return openDIDAddress;
-    }
-
-    function getUserDeployments(
-        address user
-    ) external view returns (address[] memory) {
-        return userDeployments[user];
-    }
-
-    function getTotalDeployments() external view returns (uint256) {
-        return allDeployments.length;
     }
 }
