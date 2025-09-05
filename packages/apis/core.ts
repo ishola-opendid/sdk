@@ -1,349 +1,524 @@
-// OpenDID SDK Core API
-import { EthereumProvider } from './infrastructure/blockchain/EthereumProvider.js';
-import { FilecoinProvider } from './infrastructure/blockchain/FilecoinProvider.js';
-import { ENSService } from './service/ENSService.js';
-import { ClaimsService } from './service/ClaimsService.js';
-import { IPFSService } from './service/IPFSService.js';
-import { RegisterDIDUseCase } from './application/usecase/RegisterDIDUseCase.js';
-import { IssueClaimUseCase } from './application/usecase/IssueClaimUseCase.js';
-import { VerifyClaimUseCase } from './application/usecase/VerifyClaimUseCase.js';
-import type { Claim, ClaimType, ENSName } from './domain/types.js';
+import * as did from "./did.js";
+import { encryptDidDoc } from "./encrypt.js";
+import { decryptDidDoc } from "./decrypt.js";
+import {
+  makeRecipientKeypair,
+  importRecipientPublicKey,
+  importRecipientPrivateKey,
+} from "./keys.js";
+import type { JWK } from "jose";
 
-export interface OpenDIDConfig {
-  // Ethereum configuration
-  ethereum: {
-    rpcUrl: string;
-    privateKey?: string;
-    openDIDContractAddress: string;
-    ensRegistryAddress: string;
-  };
-  
-  // Filecoin configuration
-  filecoin: {
-    rpcUrl: string;
-    privateKey?: string;
-    didClaimsRegistryAddress: string;
-  };
-  
-  // IPFS configuration
-  ipfs: {
-    endpoint: string;
-    apiKey?: string;
-  };
+interface IPFSResponse {
+  Hash: string;
+  Name: string;
+  Size: string;
 }
 
-export class OpenDID {
-  private ethereumProvider: EthereumProvider;
-  private filecoinProvider: FilecoinProvider;
-  private ensService: ENSService;
-  private claimsService: ClaimsService;
-  private ipfsService: IPFSService;
-  private registerDIDUseCase: RegisterDIDUseCase;
-  private issueClaimUseCase: IssueClaimUseCase;
-  private verifyClaimUseCase: VerifyClaimUseCase;
+interface DIDRegistryConfig {
+  ipfsEndpoint?: string;
+  filecoinContract: string;
+  ethereumContract: string;
+  web3Provider: any;
+  filecoinProvider: any;
+}
 
-  constructor(config: OpenDIDConfig) {
-    // Initialize providers
-    this.ethereumProvider = new EthereumProvider(config.ethereum);
-    this.filecoinProvider = new FilecoinProvider(config.filecoin);
-    this.ipfsService = new IPFSService(config.ipfs);
+class CoreAPI {
+  private recipientKeyPair: { pubJwk: JWK; privJwk: JWK } | null = null;
+  private ipfsEndpoint: string;
+  private filecoinContract: string;
+  private ethereumContract: string;
+  private web3Provider: any;
+  private filecoinProvider: any;
 
-    // Initialize services
-    this.ensService = new ENSService(this.ethereumProvider);
-    this.claimsService = new ClaimsService(this.filecoinProvider);
-
-    // Initialize use cases
-    this.registerDIDUseCase = new RegisterDIDUseCase(
-      this.ensService,
-      this.claimsService,
-      this.ipfsService
-    );
-    this.issueClaimUseCase = new IssueClaimUseCase(
-      this.ensService,
-      this.claimsService,
-      this.ipfsService
-    );
-    this.verifyClaimUseCase = new VerifyClaimUseCase(
-      this.ensService,
-      this.claimsService,
-      this.ipfsService
-    );
+  constructor(config: DIDRegistryConfig) {
+    this.ipfsEndpoint = config.ipfsEndpoint || "http://localhost:5001";
+    this.filecoinContract = config.filecoinContract;
+    this.ethereumContract = config.ethereumContract;
+    this.web3Provider = config.web3Provider;
+    this.filecoinProvider = config.filecoinProvider;
   }
 
-  // ===== DID Registration Methods =====
+  async initialize() {
+    if (!this.recipientKeyPair) {
+      this.recipientKeyPair = await makeRecipientKeypair();
+    }
+  }
+
+  // =============================================================================
+  // CREDENTIAL MANAGEMENT
+  // =============================================================================
 
   /**
-   * Register a DID for an ENS name on Ethereum
-   * @param ensName The ENS name (e.g., "vitalik.eth")
-   * @returns Transaction hash
+   * Create a new credential type (like "ghana-passport", "ghana-card")
+   * Only needs to be done once per credential type
    */
-  async registerDID(ensName: string): Promise<string> {
-    return await this.registerDIDUseCase.execute(ensName);
+  async createCredentialType(
+    credentialType: string,
+    description: string
+  ): Promise<void> {
+    try {
+      const contract = new this.filecoinProvider.eth.Contract(
+        this.getFilecoinABI(),
+        this.filecoinContract
+      );
+
+      const accounts = await this.filecoinProvider.eth.getAccounts();
+
+      await contract.methods
+        .createCredentialType(credentialType, description)
+        .send({ from: accounts[0] });
+
+      console.log(
+        `✅ Credential type '${credentialType}' created successfully`
+      );
+    } catch (error) {
+      throw new Error(
+        `Failed to create credential type: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   }
 
+  // =============================================================================
+  // DID MANAGEMENT
+  // =============================================================================
+
   /**
-   * Register a DID on Filecoin network
-   * @param ensName The ENS name
-   * @returns Transaction hash
+   * Register a DID on Ethereum (ENS) - one-time setup
    */
-  async registerDIDOnFilecoin(ensName: string): Promise<string> {
-    return await this.registerDIDUseCase.registerOnFilecoin(ensName);
+  async registerDIDOnEthereum(ensName: string): Promise<void> {
+    try {
+      const contract = new this.web3Provider.eth.Contract(
+        this.getEthereumABI(),
+        this.ethereumContract
+      );
+
+      const accounts = await this.web3Provider.eth.getAccounts();
+
+      await contract.methods.registerDID(ensName).send({ from: accounts[0] });
+
+      console.log(`✅ DID registered on Ethereum for ${ensName}`);
+    } catch (error) {
+      throw new Error(
+        `Failed to register DID on Ethereum: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   }
 
   /**
-   * Complete DID registration (both Ethereum and Filecoin)
-   * @param ensName The ENS name
-   * @returns Object with both transaction hashes
+   * Register DID on Filecoin (first time only)
    */
-  async completeDIDRegistration(ensName: string): Promise<{
-    ethereumTxHash: string;
-    filecoinTxHash: string;
-  }> {
-    return await this.registerDIDUseCase.completeRegistration(ensName);
+  async registerDIDOnFilecoin(ensName: string): Promise<void> {
+    try {
+      // Generate registration message hash
+      const messageHash = await this.generateRegistrationMessage(ensName);
+
+      // Sign the message
+      const accounts = await this.web3Provider.eth.getAccounts();
+      const signature = await this.web3Provider.eth.personal.sign(
+        messageHash,
+        accounts[0]
+      );
+
+      // Register on Filecoin
+      const did = `did:opendid:${ensName}`;
+      const contract = new this.filecoinProvider.eth.Contract(
+        this.getFilecoinABI(),
+        this.filecoinContract
+      );
+
+      await contract.methods
+        .registerDID(did, accounts[0], signature)
+        .send({ from: accounts[0] });
+
+      console.log(`✅ DID registered on Filecoin for ${ensName}`);
+    } catch (error) {
+      throw new Error(
+        `Failed to register DID on Filecoin: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   }
 
-  /**
-   * Check if an ENS name has a DID record
-   * @param ensName The ENS name
-   * @returns True if DID exists
-   */
-  async hasDID(ensName: string): Promise<boolean> {
-    return await this.ensService.hasDID(ensName);
-  }
+  // =============================================================================
+  // CLAIM OPERATIONS
+  // =============================================================================
 
   /**
-   * Get ENS name information
-   * @param ensName The ENS name
-   * @returns ENS name information
-   */
-  async getENSNameInfo(ensName: string): Promise<ENSName> {
-    return await this.ensService.getENSNameInfo(ensName);
-  }
-
-  // ===== Claim Type Management =====
-
-  /**
-   * Create a new claim type
-   * @param claimType The unique identifier for the claim type
-   * @param description Human-readable description
-   * @returns Transaction hash
-   */
-  async createClaimType(claimType: string, description: string): Promise<string> {
-    return await this.issueClaimUseCase.createClaimType(claimType, description);
-  }
-
-  /**
-   * Get claim type information
-   * @param claimType The claim type identifier
-   * @returns Claim type information
-   */
-  async getClaimType(claimType: string): Promise<ClaimType> {
-    return await this.claimsService.getClaimType(claimType);
-  }
-
-  /**
-   * Check if a claim type exists
-   * @param claimType The claim type identifier
-   * @returns True if exists
-   */
-  async isClaimTypeExists(claimType: string): Promise<boolean> {
-    return await this.claimsService.isClaimTypeExists(claimType);
-  }
-
-  // ===== Claim Issuance =====
-
-  /**
-   * Issue a claim with a specific claim type
-   * @param ensName The ENS name of the subject
-   * @param claimType The type of claim
-   * @param claimData The claim data to be stored
-   * @returns Object with IPFS CID and transaction hash
+   * Issue a claim - the main badass function 🚀
    */
   async issueClaim(
     ensName: string,
-    claimType: string,
-    claimData: Record<string, any>
-  ): Promise<{
-    cid: string;
-    txHash: string;
-    did: string;
-  }> {
-    return await this.issueClaimUseCase.issueClaim(ensName, claimType, claimData);
+    credentialType: string,
+    claimData: did.DIDDocument
+  ): Promise<string> {
+    await this.ensureInitialized();
+
+    try {
+      // 1. Encrypt the claim data
+      const encrypted = await this.encryptClaim(claimData);
+
+      // 2. Upload to IPFS
+      const cid = await this.ipfsUpload(encrypted);
+      console.log(`📦 Claim uploaded to IPFS: ${cid}`);
+
+      // 3. Generate signature for Filecoin
+      const messageHash = await this.generateClaimMessage(
+        ensName,
+        cid,
+        credentialType
+      );
+      const accounts = await this.web3Provider.eth.getAccounts();
+      const signature = await this.web3Provider.eth.personal.sign(
+        messageHash,
+        accounts[0]
+      );
+
+      // 4. Store on Filecoin
+      const did = `did:opendid:${ensName}`;
+      const contract = new this.filecoinProvider.eth.Contract(
+        this.getFilecoinABI(),
+        this.filecoinContract
+      );
+
+      await contract.methods
+        .issueClaim(did, cid, credentialType, signature)
+        .send({ from: accounts[0] });
+
+      console.log(
+        `🎉 Claim issued successfully for ${ensName} (${credentialType})`
+      );
+      return cid;
+    } catch (error) {
+      throw new Error(
+        `Failed to issue claim: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   }
 
   /**
-   * Issue multiple claims of the same type
-   * @param ensNames Array of ENS names
-   * @param claimType The type of claim
-   * @param claimData The claim data to be stored
-   * @returns Array of results
-   */
-  async issueBulkClaims(
-    ensNames: string[],
-    claimType: string,
-    claimData: Record<string, any>
-  ): Promise<Array<{
-    ensName: string;
-    cid: string;
-    txHash: string;
-    did: string;
-  }>> {
-    return await this.issueClaimUseCase.issueBulkClaims(ensNames, claimType, claimData);
-  }
-
-  // ===== Claim Verification =====
-
-  /**
-   * Verify a specific claim by retrieving it from IPFS and validating it
-   * @param did The DID
-   * @param claimType The claim type
-   * @param index The claim index
-   * @returns Verified claim data
+   * Verify and retrieve a claim - the other badass function 🔍
    */
   async verifyClaim(
-    did: string,
-    claimType: string,
-    index: number
-  ): Promise<Claim> {
-    return await this.verifyClaimUseCase.verifyClaim(did, claimType, index);
+    ensName: string,
+    credentialType: string
+  ): Promise<did.DIDDocument> {
+    await this.ensureInitialized();
+
+    try {
+      // 1. Get claim CID from Filecoin
+      const did = `did:opendid:${ensName}`;
+      const contract = new this.filecoinProvider.eth.Contract(
+        this.getFilecoinABI(),
+        this.filecoinContract
+      );
+
+      const cid = await contract.methods.getClaim(did, credentialType).call();
+
+      if (!cid) {
+        throw new Error(
+          `No claim found for ${ensName} with credential type ${credentialType}`
+        );
+      }
+
+      console.log(`🔍 Found claim CID: ${cid}`);
+
+      // 2. Retrieve from IPFS
+      const encrypted = await this.ipfsRetrieve(cid);
+
+      // 3. Decrypt and return
+      const claimData = await this.decryptClaim(encrypted);
+
+      console.log(`✅ Claim verified and decrypted for ${ensName}`);
+      return claimData;
+    } catch (error) {
+      throw new Error(
+        `Failed to verify claim: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
+    }
   }
 
   /**
-   * Get all claims of a specific type for a DID
-   * @param did The DID
-   * @param claimType The claim type
-   * @returns Array of verified claims
+   * Bulk issue multiple claims - for the power users 💪
    */
-  async getAllClaimsByType(did: string, claimType: string): Promise<Claim[]> {
-    return await this.verifyClaimUseCase.getAllClaimsByType(did, claimType);
+  async bulkIssueClaims(
+    ensName: string,
+    claims: Array<{ credentialType: string; data: did.DIDDocument }>
+  ): Promise<string[]> {
+    const results = await Promise.allSettled(
+      claims.map(({ credentialType, data }) =>
+        this.issueClaim(ensName, credentialType, data)
+      )
+    );
+
+    const cids: string[] = [];
+    const errors: string[] = [];
+
+    results.forEach((result, index) => {
+      if (result.status === "fulfilled") {
+        cids.push(result.value);
+      } else {
+        errors.push(
+          `Claim ${index} (${claims[index].credentialType}): ${result.reason}`
+        );
+      }
+    });
+
+    if (errors.length > 0) {
+      console.warn(`⚠️ Some claims failed:`, errors);
+    }
+
+    console.log(
+      `🚀 Bulk issued ${cids.length}/${claims.length} claims successfully`
+    );
+    return cids;
   }
 
-  /**
-   * Get the latest claim of a specific type for a DID
-   * @param did The DID
-   * @param claimType The claim type
-   * @returns Latest verified claim
-   */
-  async getLatestClaimByType(did: string, claimType: string): Promise<Claim | null> {
-    return await this.verifyClaimUseCase.getLatestClaimByType(did, claimType);
+  // =============================================================================
+  // HELPER METHODS
+  // =============================================================================
+
+  private async ensureInitialized(): Promise<void> {
+    if (!this.recipientKeyPair) {
+      await this.initialize();
+    }
   }
 
-  /**
-   * Check if a DID has claims of a specific type
-   * @param did The DID
-   * @param claimType The claim type
-   * @returns True if has claims of the type
-   */
-  async hasClaimsOfType(did: string, claimType: string): Promise<boolean> {
-    return await this.verifyClaimUseCase.hasClaimsOfType(did, claimType);
+  private async generateRegistrationMessage(ensName: string): Promise<string> {
+    const contract = new this.web3Provider.eth.Contract(
+      this.getEthereumABI(),
+      this.ethereumContract
+    );
+
+    return await contract.methods
+      .generateRegistrationMessage(ensName, this.filecoinContract)
+      .call();
   }
 
-  // ===== Utility Methods =====
+  private async generateClaimMessage(
+    ensName: string,
+    cid: string,
+    credentialType: string
+  ): Promise<string> {
+    const contract = new this.web3Provider.eth.Contract(
+      this.getEthereumABI(),
+      this.ethereumContract
+    );
 
-  /**
-   * Get the current Ethereum address
-   * @returns Ethereum address
-   */
-  async getAddress(): Promise<string> {
-    return await this.ethereumProvider.getAddress();
+    return await contract.methods
+      .generateClaimMessage(ensName, cid, credentialType, this.filecoinContract)
+      .call();
   }
 
-  /**
-   * Get network information for Ethereum
-   * @returns Network information
-   */
-  async getEthereumNetwork(): Promise<any> {
-    return await this.ethereumProvider.getNetwork();
+  private async encryptClaim(claimData: did.DIDDocument): Promise<string> {
+    if (!this.recipientKeyPair) {
+      throw new Error("Not initialized");
+    }
+
+    return await encryptDidDoc(claimData, this.recipientKeyPair.pubJwk);
   }
 
-  /**
-   * Get network information for Filecoin
-   * @returns Network information
-   */
-  async getFilecoinNetwork(): Promise<any> {
-    return await this.filecoinProvider.getNetwork();
+  private async decryptClaim(encrypted: string): Promise<did.DIDDocument> {
+    if (!this.recipientKeyPair) {
+      throw new Error("Not initialized");
+    }
+
+    const decrypted = await decryptDidDoc(
+      encrypted,
+      this.recipientKeyPair.privJwk
+    );
+    this.validateDIDDocument(decrypted);
+    return decrypted as did.DIDDocument;
   }
 
-  /**
-   * Check if IPFS is accessible
-   * @returns True if accessible
-   */
-  async isIPFSAccessible(): Promise<boolean> {
-    return await this.ipfsService.isAccessible();
+  private async ipfsUpload(data: string): Promise<string> {
+    const formData = new FormData();
+    const blob = new Blob([data], { type: "application/json" });
+    formData.append("file", blob);
+
+    const response = await fetch(`${this.ipfsEndpoint}/api/v0/add`, {
+      method: "POST",
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new Error(`IPFS upload failed: ${response.statusText}`);
+    }
+
+    const result: IPFSResponse = await response.json();
+    return result.Hash;
   }
 
-  /**
-   * Upload data to IPFS
-   * @param data The data to upload
-   * @param filename Optional filename
-   * @returns IPFS hash (CID)
-   */
-  async uploadToIPFS(data: string | Blob | File, filename?: string): Promise<string> {
-    return await this.ipfsService.upload(data, filename);
+  private async ipfsRetrieve(cid: string): Promise<string> {
+    const response = await fetch(`${this.ipfsEndpoint}/api/v0/cat?arg=${cid}`, {
+      method: "POST",
+    });
+
+    if (!response.ok) {
+      throw new Error(`IPFS retrieval failed: ${response.statusText}`);
+    }
+
+    return await response.text();
   }
 
-  /**
-   * Retrieve data from IPFS
-   * @param cid The IPFS hash (CID)
-   * @returns The data as string
-   */
-  async retrieveFromIPFS(cid: string): Promise<string> {
-    return await this.ipfsService.retrieve(cid);
+  private validateDIDDocument(data: any): void {
+    if (!data || typeof data !== "object") {
+      throw new Error("Invalid DID document: not an object");
+    }
+
+    const requiredFields = ["@context", "id", "issuerId", "subjectId"];
+    for (const field of requiredFields) {
+      if (!(field in data)) {
+        throw new Error(`Invalid DID document: missing field '${field}'`);
+      }
+    }
+
+    if (!data.id.startsWith("did:")) {
+      throw new Error("Invalid DID document: id must start with 'did:'");
+    }
   }
 
-  /**
-   * Retrieve JSON data from IPFS
-   * @param cid The IPFS hash (CID)
-   * @returns The data as parsed JSON
-   */
-  async retrieveJSONFromIPFS<T = any>(cid: string): Promise<T> {
-    return await this.ipfsService.retrieveJSON<T>(cid);
+  // =============================================================================
+  // UTILITY METHODS
+  // =============================================================================
+
+  async checkCredentialExists(credentialType: string): Promise<boolean> {
+    const contract = new this.filecoinProvider.eth.Contract(
+      this.getFilecoinABI(),
+      this.filecoinContract
+    );
+
+    return await contract.methods.credentialExists(credentialType).call();
   }
 
-  /**
-   * Get all claims for a DID (general)
-   * @param did The DID
-   * @returns Array of claim CIDs
-   */
-  async getAllClaims(did: string): Promise<string[]> {
-    return await this.claimsService.getAllClaims(did);
+  async isDIDRegistered(
+    ensName: string
+  ): Promise<{ ethereum: boolean; filecoin: boolean }> {
+    const did = `did:opendid:${ensName}`;
+
+    // Check Ethereum
+    const ethContract = new this.web3Provider.eth.Contract(
+      this.getEthereumABI(),
+      this.ethereumContract
+    );
+    const ethereumRegistered = await ethContract.methods.hasDID(ensName).call();
+
+    // Check Filecoin
+    const filContract = new this.filecoinProvider.eth.Contract(
+      this.getFilecoinABI(),
+      this.filecoinContract
+    );
+    const filecoinRegistered = await filContract.methods
+      .isDIDRegistered(did)
+      .call();
+
+    return { ethereum: ethereumRegistered, filecoin: filecoinRegistered };
   }
 
-  /**
-   * Get the latest CID for a DID (general)
-   * @param did The DID
-   * @returns Latest CID
-   */
-  async getLatestCID(did: string): Promise<string> {
-    return await this.claimsService.getLatestCID(did);
+  async exportPublicKey(): Promise<JWK | null> {
+    return this.recipientKeyPair?.pubJwk || null;
   }
 
-  /**
-   * Get total number of claims for a DID (general)
-   * @param did The DID
-   * @returns Number of claims
-   */
-  async getClaimsCount(did: string): Promise<number> {
-    return await this.claimsService.getClaimsCount(did);
+  async setKeyPair(pubJwk: JWK, privJwk: JWK): Promise<void> {
+    await importRecipientPublicKey(pubJwk);
+    await importRecipientPrivateKey(privJwk);
+    this.recipientKeyPair = { pubJwk, privJwk };
   }
 
-  /**
-   * Check if a DID is registered on Filecoin
-   * @param did The DID
-   * @returns True if registered
-   */
-  async isDIDRegistered(did: string): Promise<boolean> {
-    return await this.claimsService.isDIDRegistered(did);
+  // =============================================================================
+  // ABI DEFINITIONS (simplified - replace with actual ABIs)
+  // =============================================================================
+
+  private getEthereumABI(): any[] {
+    return [
+      {
+        inputs: [{ type: "string", name: "ensName" }],
+        name: "registerDID",
+        outputs: [],
+        type: "function",
+      },
+      {
+        inputs: [
+          { type: "string", name: "ensName" },
+          { type: "string", name: "cid" },
+          { type: "string", name: "credentialType" },
+          { type: "address", name: "filecoinContract" },
+        ],
+        name: "generateClaimMessage",
+        outputs: [{ type: "bytes32", name: "messageHash" }],
+        type: "function",
+      },
+      {
+        inputs: [
+          { type: "string", name: "ensName" },
+          { type: "address", name: "filecoinContract" },
+        ],
+        name: "generateRegistrationMessage",
+        outputs: [{ type: "bytes32", name: "messageHash" }],
+        type: "function",
+      },
+      {
+        inputs: [{ type: "string", name: "ensName" }],
+        name: "hasDID",
+        outputs: [{ type: "bool" }],
+        type: "function",
+      },
+    ];
   }
 
-  /**
-   * Get current nonce for a DID
-   * @param did The DID
-   * @returns Current nonce
-   */
-  async getCurrentNonce(did: string): Promise<number> {
-    return await this.claimsService.getCurrentNonce(did);
+  private getFilecoinABI(): any[] {
+    return [
+      {
+        inputs: [
+          { type: "string", name: "credentialType" },
+          { type: "string", name: "description" },
+        ],
+        name: "createCredentialType",
+        outputs: [],
+        type: "function",
+      },
+      {
+        inputs: [
+          { type: "string", name: "did" },
+          { type: "address", name: "expectedEthOwner" },
+          { type: "bytes", name: "sig" },
+        ],
+        name: "registerDID",
+        outputs: [],
+        type: "function",
+      },
+      {
+        inputs: [
+          { type: "string", name: "did" },
+          { type: "string", name: "cid" },
+          { type: "string", name: "credentialType" },
+          { type: "bytes", name: "sig" },
+        ],
+        name: "issueClaim",
+        outputs: [],
+        type: "function",
+      },
+      {
+        inputs: [
+          { type: "string", name: "did" },
+          { type: "string", name: "credentialType" },
+        ],
+        name: "getClaim",
+        outputs: [{ type: "string", name: "cid" }],
+        type: "function",
+      },
+      {
+        inputs: [{ type: "string", name: "credentialType" }],
+        name: "credentialExists",
+        outputs: [{ type: "bool" }],
+        type: "function",
+      },
+      {
+        inputs: [{ type: "string", name: "did" }],
+        name: "isDIDRegistered",
+        outputs: [{ type: "bool" }],
+        type: "function",
+      },
+    ];
   }
 }
 
-export default OpenDID;
+export default CoreAPI;
