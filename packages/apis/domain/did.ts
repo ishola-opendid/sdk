@@ -1,4 +1,4 @@
-export interface DIDDocument {
+export interface ClaimDocument {
   claimId: string;
   context: string[];
   data: {
