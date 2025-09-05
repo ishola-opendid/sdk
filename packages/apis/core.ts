@@ -1,333 +1,349 @@
-import * as did from "./did.js";
-import { encryptDidDoc } from "./encrypt.js";
-import { decryptDidDoc } from "./decrypt.js";
-import {
-  makeRecipientKeypair,
-  importRecipientPublicKey,
-  importRecipientPrivateKey,
-} from "./keys.js";
-import type { JWK } from "jose";
-interface IPFSResponse {
-  Hash: string;
-  Name: string;
-  Size: string;
+// OpenDID SDK Core API
+import { EthereumProvider } from './infrastructure/blockchain/EthereumProvider.js';
+import { FilecoinProvider } from './infrastructure/blockchain/FilecoinProvider.js';
+import { ENSService } from './service/ENSService.js';
+import { ClaimsService } from './service/ClaimsService.js';
+import { IPFSService } from './service/IPFSService.js';
+import { RegisterDIDUseCase } from './application/usecase/RegisterDIDUseCase.js';
+import { IssueClaimUseCase } from './application/usecase/IssueClaimUseCase.js';
+import { VerifyClaimUseCase } from './application/usecase/VerifyClaimUseCase.js';
+import type { Claim, ClaimType, ENSName } from './domain/types.js';
+
+export interface OpenDIDConfig {
+  // Ethereum configuration
+  ethereum: {
+    rpcUrl: string;
+    privateKey?: string;
+    openDIDContractAddress: string;
+    ensRegistryAddress: string;
+  };
+  
+  // Filecoin configuration
+  filecoin: {
+    rpcUrl: string;
+    privateKey?: string;
+    didClaimsRegistryAddress: string;
+  };
+  
+  // IPFS configuration
+  ipfs: {
+    endpoint: string;
+    apiKey?: string;
+  };
 }
 
-interface ChainClaimData {
-  cid: string;
-  timestamp: number;
-  issuerId: string;
-  subjectId: string;
-}
+export class OpenDID {
+  private ethereumProvider: EthereumProvider;
+  private filecoinProvider: FilecoinProvider;
+  private ensService: ENSService;
+  private claimsService: ClaimsService;
+  private ipfsService: IPFSService;
+  private registerDIDUseCase: RegisterDIDUseCase;
+  private issueClaimUseCase: IssueClaimUseCase;
+  private verifyClaimUseCase: VerifyClaimUseCase;
 
-class CoreAPI {
-  private recipientKeyPair: { pubJwk: JWK; privJwk: JWK } | null = null;
-  private ipfsEndpoint: string;
-  private contractAddress: string;
-  private web3Provider: any; // Replace with actual Web3/ethers provider type
+  constructor(config: OpenDIDConfig) {
+    // Initialize providers
+    this.ethereumProvider = new EthereumProvider(config.ethereum);
+    this.filecoinProvider = new FilecoinProvider(config.filecoin);
+    this.ipfsService = new IPFSService(config.ipfs);
 
-  constructor(
-    config: {
-      ipfsEndpoint?: string;
-      contractAddress?: string;
-      web3Provider?: any;
-    } = {}
-  ) {
-    this.ipfsEndpoint = config.ipfsEndpoint || "http://localhost:5001";
-    this.contractAddress = config.contractAddress || "";
-    this.web3Provider = config.web3Provider;
+    // Initialize services
+    this.ensService = new ENSService(this.ethereumProvider);
+    this.claimsService = new ClaimsService(this.filecoinProvider);
+
+    // Initialize use cases
+    this.registerDIDUseCase = new RegisterDIDUseCase(
+      this.ensService,
+      this.claimsService,
+      this.ipfsService
+    );
+    this.issueClaimUseCase = new IssueClaimUseCase(
+      this.ensService,
+      this.claimsService,
+      this.ipfsService
+    );
+    this.verifyClaimUseCase = new VerifyClaimUseCase(
+      this.ensService,
+      this.claimsService,
+      this.ipfsService
+    );
   }
 
-  // Initialize encryption keys (should be called once during setup)
-  async initialize() {
-    if (!this.recipientKeyPair) {
-      this.recipientKeyPair = await makeRecipientKeypair();
-    }
+  // ===== DID Registration Methods =====
+
+  /**
+   * Register a DID for an ENS name on Ethereum
+   * @param ensName The ENS name (e.g., "vitalik.eth")
+   * @returns Transaction hash
+   */
+  async registerDID(ensName: string): Promise<string> {
+    return await this.registerDIDUseCase.execute(ensName);
   }
 
-  // Core API methods
-  async issueClaim(did: did.DIDDocument): Promise<string> {
-    await this.ensureInitialized();
-
-    // Implementation for issuing a claim
-    // Encrypt the claim data
-    const encrypted = await this.encryptClaim(did);
-
-    // Store claim data on IPFS and return CID
-    const cid = await this.ipfsUpload(encrypted);
-
-    // Interact with smart contract to store claim CID
-    await this.storeOnChain(did.issuerId, did.subjectId, cid);
-
-    return cid;
+  /**
+   * Register a DID on Filecoin network
+   * @param ensName The ENS name
+   * @returns Transaction hash
+   */
+  async registerDIDOnFilecoin(ensName: string): Promise<string> {
+    return await this.registerDIDUseCase.registerOnFilecoin(ensName);
   }
 
+  /**
+   * Complete DID registration (both Ethereum and Filecoin)
+   * @param ensName The ENS name
+   * @returns Object with both transaction hashes
+   */
+  async completeDIDRegistration(ensName: string): Promise<{
+    ethereumTxHash: string;
+    filecoinTxHash: string;
+  }> {
+    return await this.registerDIDUseCase.completeRegistration(ensName);
+  }
+
+  /**
+   * Check if an ENS name has a DID record
+   * @param ensName The ENS name
+   * @returns True if DID exists
+   */
+  async hasDID(ensName: string): Promise<boolean> {
+    return await this.ensService.hasDID(ensName);
+  }
+
+  /**
+   * Get ENS name information
+   * @param ensName The ENS name
+   * @returns ENS name information
+   */
+  async getENSNameInfo(ensName: string): Promise<ENSName> {
+    return await this.ensService.getENSNameInfo(ensName);
+  }
+
+  // ===== Claim Type Management =====
+
+  /**
+   * Create a new claim type
+   * @param claimType The unique identifier for the claim type
+   * @param description Human-readable description
+   * @returns Transaction hash
+   */
+  async createClaimType(claimType: string, description: string): Promise<string> {
+    return await this.issueClaimUseCase.createClaimType(claimType, description);
+  }
+
+  /**
+   * Get claim type information
+   * @param claimType The claim type identifier
+   * @returns Claim type information
+   */
+  async getClaimType(claimType: string): Promise<ClaimType> {
+    return await this.claimsService.getClaimType(claimType);
+  }
+
+  /**
+   * Check if a claim type exists
+   * @param claimType The claim type identifier
+   * @returns True if exists
+   */
+  async isClaimTypeExists(claimType: string): Promise<boolean> {
+    return await this.claimsService.isClaimTypeExists(claimType);
+  }
+
+  // ===== Claim Issuance =====
+
+  /**
+   * Issue a claim with a specific claim type
+   * @param ensName The ENS name of the subject
+   * @param claimType The type of claim
+   * @param claimData The claim data to be stored
+   * @returns Object with IPFS CID and transaction hash
+   */
+  async issueClaim(
+    ensName: string,
+    claimType: string,
+    claimData: Record<string, any>
+  ): Promise<{
+    cid: string;
+    txHash: string;
+    did: string;
+  }> {
+    return await this.issueClaimUseCase.issueClaim(ensName, claimType, claimData);
+  }
+
+  /**
+   * Issue multiple claims of the same type
+   * @param ensNames Array of ENS names
+   * @param claimType The type of claim
+   * @param claimData The claim data to be stored
+   * @returns Array of results
+   */
+  async issueBulkClaims(
+    ensNames: string[],
+    claimType: string,
+    claimData: Record<string, any>
+  ): Promise<Array<{
+    ensName: string;
+    cid: string;
+    txHash: string;
+    did: string;
+  }>> {
+    return await this.issueClaimUseCase.issueBulkClaims(ensNames, claimType, claimData);
+  }
+
+  // ===== Claim Verification =====
+
+  /**
+   * Verify a specific claim by retrieving it from IPFS and validating it
+   * @param did The DID
+   * @param claimType The claim type
+   * @param index The claim index
+   * @returns Verified claim data
+   */
   async verifyClaim(
-    issuerId: string,
-    claimId: string
-  ): Promise<did.DIDDocument> {
-    await this.ensureInitialized();
-
-    // Implementation for verifying a claim
-    // Get encrypted claim from blockchain
-    const chainData = await this.getClaimFromChain(issuerId, claimId);
-
-    // Retrieve encrypted data from IPFS
-    const encrypted = await this.ipfsRetrieve(chainData.cid);
-
-    // Decrypt and validate the claim
-    const didDoc = await this.decryptClaim(encrypted);
-
-    // Additional validation
-    this.validateClaimIntegrity(didDoc, issuerId, chainData);
-
-    return didDoc;
+    did: string,
+    claimType: string,
+    index: number
+  ): Promise<Claim> {
+    return await this.verifyClaimUseCase.verifyClaim(did, claimType, index);
   }
 
-  async bulkIssueClaims(dids: did.DIDDocument[]): Promise<string[]> {
-    // Implementation for bulk issuing claims
-    const cids = await Promise.all(
-      dids.map(async (d) => await this.issueClaim(d))
-    );
-    return cids;
+  /**
+   * Get all claims of a specific type for a DID
+   * @param did The DID
+   * @param claimType The claim type
+   * @returns Array of verified claims
+   */
+  async getAllClaimsByType(did: string, claimType: string): Promise<Claim[]> {
+    return await this.verifyClaimUseCase.getAllClaimsByType(did, claimType);
   }
 
-  async bulkVerifyClaims(
-    issuerId: string,
-    claimIds: string[]
-  ): Promise<did.DIDDocument[]> {
-    // Implementation for bulk verifying claims
-    const dids = await Promise.all(
-      claimIds.map((id) => this.verifyClaim(issuerId, id))
-    );
-    return dids;
+  /**
+   * Get the latest claim of a specific type for a DID
+   * @param did The DID
+   * @param claimType The claim type
+   * @returns Latest verified claim
+   */
+  async getLatestClaimByType(did: string, claimType: string): Promise<Claim | null> {
+    return await this.verifyClaimUseCase.getLatestClaimByType(did, claimType);
   }
 
-  // Private helper methods
-  private async ensureInitialized(): Promise<void> {
-    if (!this.recipientKeyPair) {
-      await this.initialize();
-    }
+  /**
+   * Check if a DID has claims of a specific type
+   * @param did The DID
+   * @param claimType The claim type
+   * @returns True if has claims of the type
+   */
+  async hasClaimsOfType(did: string, claimType: string): Promise<boolean> {
+    return await this.verifyClaimUseCase.hasClaimsOfType(did, claimType);
   }
 
-  private async encryptClaim(didDoc: did.DIDDocument): Promise<string> {
-    if (!this.recipientKeyPair) {
-      throw new Error("CoreAPI not initialized. Call initialize() first.");
-    }
+  // ===== Utility Methods =====
 
-    try {
-      const encrypted = await encryptDidDoc(
-        didDoc,
-        this.recipientKeyPair.pubJwk
-      );
-      return encrypted;
-    } catch (error) {
-      throw new Error(
-        `Failed to encrypt claim: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
-  }
-  private async decryptClaim(encrypted: string): Promise<did.DIDDocument> {
-    if (!this.recipientKeyPair) {
-      throw new Error("CoreAPI not initialized. Call initialize() first.");
-    }
-
-    try {
-      // Decrypt the claim
-      const decryptedData = await decryptDidDoc(
-        encrypted,
-        this.recipientKeyPair.privJwk
-      );
-
-      // Validate the structure of the decrypted data to match DIDDocument
-      this.validateDIDDocumentStructure(decryptedData);
-
-      return decryptedData as did.DIDDocument;
-    } catch (error) {
-      throw new Error(
-        `Failed to decrypt claim: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
+  /**
+   * Get the current Ethereum address
+   * @returns Ethereum address
+   */
+  async getAddress(): Promise<string> {
+    return await this.ethereumProvider.getAddress();
   }
 
-  private async ipfsUpload(encrypted: string): Promise<string> {
-    try {
-      const formData = new FormData();
-      const blob = new Blob([encrypted], { type: "application/json" });
-      formData.append("file", blob);
-
-      const response = await fetch(`${this.ipfsEndpoint}/api/v0/add`, {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(`IPFS upload failed: ${response.statusText}`);
-      }
-
-      const result: IPFSResponse = await response.json();
-      return result.Hash;
-    } catch (error) {
-      throw new Error(
-        `IPFS upload failed: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
+  /**
+   * Get network information for Ethereum
+   * @returns Network information
+   */
+  async getEthereumNetwork(): Promise<any> {
+    return await this.ethereumProvider.getNetwork();
   }
 
-  private async ipfsRetrieve(cid: string): Promise<string> {
-    try {
-      const response = await fetch(
-        `${this.ipfsEndpoint}/api/v0/cat?arg=${cid}`,
-        {
-          method: "POST",
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(`IPFS retrieval failed: ${response.statusText}`);
-      }
-
-      return await response.text();
-    } catch (error) {
-      throw new Error(
-        `IPFS retrieval failed: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
+  /**
+   * Get network information for Filecoin
+   * @returns Network information
+   */
+  async getFilecoinNetwork(): Promise<any> {
+    return await this.filecoinProvider.getNetwork();
   }
 
-  private async storeOnChain(
-    issuerId: string,
-    subjectId: string,
-    cid: string
-  ): Promise<void> {
-    if (!this.web3Provider || !this.contractAddress) {
-      throw new Error("Web3 provider and contract address must be configured");
-    }
-
-    try {
-      // This is a simplified example - replace with actual smart contract interaction
-      // Using a generic contract call pattern
-      const contract = new this.web3Provider.eth.Contract(
-        // ABI would be defined elsewhere
-        [],
-        this.contractAddress
-      );
-
-      const timestamp = Math.floor(Date.now() / 1000);
-
-      // Example contract method call - adjust according to your smart contract
-      await contract.methods
-        .storeClaim(issuerId, subjectId, cid, timestamp)
-        .send({
-          from: await this.web3Provider.eth
-            .getAccounts()
-            .then((accounts: string[]) => accounts[0]),
-        });
-    } catch (error) {
-      throw new Error(
-        `Failed to store claim on chain: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
+  /**
+   * Check if IPFS is accessible
+   * @returns True if accessible
+   */
+  async isIPFSAccessible(): Promise<boolean> {
+    return await this.ipfsService.isAccessible();
   }
 
-  private async getClaimFromChain(
-    issuerId: string,
-    claimId: string
-  ): Promise<ChainClaimData> {
-    if (!this.web3Provider || !this.contractAddress) {
-      throw new Error("Web3 provider and contract address must be configured");
-    }
-
-    try {
-      // This is a simplified example - replace with actual smart contract interaction
-      const contract = new this.web3Provider.eth.Contract(
-        // ABI would be defined elsewhere
-        [],
-        this.contractAddress
-      );
-
-      const result = await contract.methods.getClaim(issuerId, claimId).call();
-
-      return {
-        cid: result.cid,
-        timestamp: parseInt(result.timestamp),
-        issuerId: result.issuerId,
-        subjectId: result.subjectId,
-      };
-    } catch (error) {
-      throw new Error(
-        `Failed to retrieve claim from chain: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
+  /**
+   * Upload data to IPFS
+   * @param data The data to upload
+   * @param filename Optional filename
+   * @returns IPFS hash (CID)
+   */
+  async uploadToIPFS(data: string | Blob | File, filename?: string): Promise<string> {
+    return await this.ipfsService.upload(data, filename);
   }
 
-  // Validation helper methods
-  private validateDIDDocumentStructure(data: any): void {
-    if (!data || typeof data !== "object") {
-      throw new Error("Invalid DID document: not an object");
-    }
-
-    // Check required fields for a DID document
-    const requiredFields = ["@context", "id", "issuerId", "subjectId"];
-    for (const field of requiredFields) {
-      if (!(field in data)) {
-        throw new Error(
-          `Invalid DID document: missing required field '${field}'`
-        );
-      }
-    }
-
-    // Validate DID format (simplified)
-    if (!data.id.startsWith("did:")) {
-      throw new Error("Invalid DID document: id must start with 'did:'");
-    }
+  /**
+   * Retrieve data from IPFS
+   * @param cid The IPFS hash (CID)
+   * @returns The data as string
+   */
+  async retrieveFromIPFS(cid: string): Promise<string> {
+    return await this.ipfsService.retrieve(cid);
   }
 
-  private validateClaimIntegrity(
-    didDoc: did.DIDDocument,
-    expectedIssuerId: string,
-    chainData: ChainClaimData
-  ): void {
-    // Validate the issuerId matches
-    if (didDoc.issuerId !== expectedIssuerId) {
-      throw new Error(
-        `Claim integrity violation: issuer ID mismatch. Expected: ${expectedIssuerId}, Got: ${didDoc.issuerId}`
-      );
-    }
-
-    // Validate the subjectId matches chain data
-    if (didDoc.subjectId !== chainData.subjectId) {
-      throw new Error(
-        `Claim integrity violation: subject ID mismatch. Expected: ${chainData.subjectId}, Got: ${didDoc.subjectId}`
-      );
-    }
-
-    // Additional validation could include:
-    // - Signature verification
-    // - Zero-knowledge proof validation
-    // - Timestamp validation
-    // - Issuer authority validation
-
-    console.log("Claim integrity validated successfully");
+  /**
+   * Retrieve JSON data from IPFS
+   * @param cid The IPFS hash (CID)
+   * @returns The data as parsed JSON
+   */
+  async retrieveJSONFromIPFS<T = any>(cid: string): Promise<T> {
+    return await this.ipfsService.retrieveJSON<T>(cid);
   }
 
-  // Utility methods for key management
-  async exportPublicKey(): Promise<JWK | null> {
-    return this.recipientKeyPair?.pubJwk || null;
+  /**
+   * Get all claims for a DID (general)
+   * @param did The DID
+   * @returns Array of claim CIDs
+   */
+  async getAllClaims(did: string): Promise<string[]> {
+    return await this.claimsService.getAllClaims(did);
   }
 
-  async setKeyPair(pubJwk: JWK, privJwk: JWK): Promise<void> {
-    // Validate the key pair before setting
-    try {
-      await importRecipientPublicKey(pubJwk);
-      await importRecipientPrivateKey(privJwk);
-      this.recipientKeyPair = { pubJwk, privJwk };
-    } catch (error) {
-      throw new Error(
-        `Invalid key pair: ${error instanceof Error ? error.message : "Unknown error"}`
-      );
-    }
+  /**
+   * Get the latest CID for a DID (general)
+   * @param did The DID
+   * @returns Latest CID
+   */
+  async getLatestCID(did: string): Promise<string> {
+    return await this.claimsService.getLatestCID(did);
+  }
+
+  /**
+   * Get total number of claims for a DID (general)
+   * @param did The DID
+   * @returns Number of claims
+   */
+  async getClaimsCount(did: string): Promise<number> {
+    return await this.claimsService.getClaimsCount(did);
+  }
+
+  /**
+   * Check if a DID is registered on Filecoin
+   * @param did The DID
+   * @returns True if registered
+   */
+  async isDIDRegistered(did: string): Promise<boolean> {
+    return await this.claimsService.isDIDRegistered(did);
+  }
+
+  /**
+   * Get current nonce for a DID
+   * @param did The DID
+   * @returns Current nonce
+   */
+  async getCurrentNonce(did: string): Promise<number> {
+    return await this.claimsService.getCurrentNonce(did);
   }
 }
 
-export default CoreAPI;
+export default OpenDID;
