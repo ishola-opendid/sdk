@@ -1,8 +1,12 @@
-import { type DIDRegistryConfig, type KeyPair } from "../domain/types.js";
+import {
+  type DIDRegistryConfig,
+  type KeyPair,
+  type FilecoinConfig,
+} from "../domain/types.js";
 import { type ClaimDocument } from "../domain/did.js";
-import { IpfsService } from "../infra/IpfsService.js";
 import { EthereumService } from "../infra/EthereumService.js";
 import { FilecoinService } from "../infra/FilecoinService.js";
+import { FilecoinStorage } from "../infra/FilecoinStorageService.js";
 import { KeyService } from "../infra/KeyService.js";
 import { IssueClaimService } from "../services/IssueClaimService.js";
 import { VerifyClaimService } from "../services/VerifyClaimService.js";
@@ -13,34 +17,34 @@ import { type JWK } from "jose";
 export default class CoreAPI {
   private keyPair: KeyPair | null = null;
 
-  private ipfsService: IpfsService;
   private ethereumService: EthereumService;
   private filecoinService: FilecoinService;
+  private filecoinStorage: FilecoinStorage;
 
   private issueClaimService: IssueClaimService;
   private verifyClaimService: VerifyClaimService;
   private registrationService: RegistrationService;
   private credentialTypeService: CredentialTypeService;
 
-  constructor(config: DIDRegistryConfig) {
-    this.ipfsService = new IpfsService(config.ipfsEndpoint);
+  constructor(didConfig: DIDRegistryConfig, fsConfig: FilecoinConfig) {
     this.ethereumService = new EthereumService(
-      config.web3Provider,
-      config.ethereumContract
+      didConfig.web3Provider,
+      didConfig.ethereumContract
     );
     this.filecoinService = new FilecoinService(
-      config.filecoinProvider,
-      config.filecoinContract
+      didConfig.filecoinProvider,
+      didConfig.filecoinContract
     );
+    this.filecoinStorage = new FilecoinStorage(fsConfig);
 
     this.issueClaimService = new IssueClaimService(
       this.ethereumService,
       this.filecoinService,
-      this.ipfsService
+      this.filecoinStorage
     );
     this.verifyClaimService = new VerifyClaimService(
       this.filecoinService,
-      this.ipfsService
+      this.filecoinStorage
     );
     this.registrationService = new RegistrationService(
       this.ethereumService,
@@ -55,6 +59,7 @@ export default class CoreAPI {
     if (!this.keyPair) {
       this.keyPair = await KeyService.makeRecipientKeypair();
     }
+    await this.filecoinStorage.initialize();
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -62,10 +67,6 @@ export default class CoreAPI {
       await this.initialize();
     }
   }
-
-  // =============================================================================
-  // Public API Methods
-  // =============================================================================
 
   async createCredentialType(
     credentialType: string,
@@ -115,7 +116,7 @@ export default class CoreAPI {
         cids.push(result.value);
       } else {
         errors.push(
-          `Claim ${index} (${claims[index].credentialType}): ${result.reason}`
+          `Claim ${index} (${claims[index]!.credentialType}): ${result.reason}`
         );
       }
     });
