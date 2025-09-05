@@ -15,10 +15,10 @@ import {
   ZkProgram,
   verify,
   Proof,
-} from 'o1js';
+} from "o1js";
 
-import * as did from "./did.js";
-import { decryptDidDoc } from "./decrypt.js";
+import * as did from "./domain/did.js";
+import { decryptDidDoc } from "./infra/decrypt.js";
 import type { JWK } from "jose";
 
 // ================================================================================================
@@ -29,7 +29,7 @@ import type { JWK } from "jose";
  * 🔐 ZK Program to prove issuer authenticity without revealing sensitive data
  */
 export const IssuerVerificationProgram = ZkProgram({
-  name: 'IssuerVerification',
+  name: "IssuerVerification",
   publicInput: Field, // Hash of the claim
   publicOutput: Field, // Hash of verified issuer ID
   methods: {
@@ -56,17 +56,17 @@ export const IssuerVerificationProgram = ZkProgram({
         // 2. Verify issuer authority by checking signature
         const issuerPubKeyHash = Poseidon.hash([issuerPrivateKey, issuerNonce]);
         const expectedIssuerHash = Poseidon.hash(issuerId.toFields());
-        
+
         // 3. Create a commitment that proves issuer signed this claim
         const issuerCommitment = Poseidon.hash([
           issuerPubKeyHash,
           computedClaimHash,
-          expectedIssuerHash
+          expectedIssuerHash,
         ]);
 
         // Return the verified issuer hash
         return expectedIssuerHash;
-      }
+      },
     },
 
     /**
@@ -81,16 +81,22 @@ export const IssuerVerificationProgram = ZkProgram({
       ): Field {
         // Verify this claim is part of a valid chain
         const issuerHash = Poseidon.hash(issuerId.toFields());
-        const chainHash = Poseidon.hash([previousProofHash, claimHash, issuerHash]);
-        
+        const chainHash = Poseidon.hash([
+          previousProofHash,
+          claimHash,
+          issuerHash,
+        ]);
+
         return chainHash;
-      }
-    }
-  }
+      },
+    },
+  },
 });
 
 // Generate types from the ZK program
-export class IssuerVerificationProof extends ZkProgram.Proof(IssuerVerificationProgram) {}
+export class IssuerVerificationProof extends ZkProgram.Proof(
+  IssuerVerificationProgram
+) {}
 
 // ================================================================================================
 // SMART CONTRACT FOR ONCHAIN VERIFICATION
@@ -169,7 +175,9 @@ export class ZKPCoreAPI {
     private zkProgramInstance = IssuerVerificationProgram
   ) {
     if (contractAddress) {
-      this.verificationContract = new IssuerVerificationContract(contractAddress);
+      this.verificationContract = new IssuerVerificationContract(
+        contractAddress
+      );
     }
   }
 
@@ -177,17 +185,17 @@ export class ZKPCoreAPI {
    * 🔐 Register issuer credentials for ZKP generation
    */
   async registerIssuer(
-    issuerId: string, 
-    privateKey: string, 
+    issuerId: string,
+    privateKey: string,
     nonce?: string
   ): Promise<void> {
     const issuerPrivateKey = Field.from(privateKey);
     const issuerNonce = nonce ? Field.from(nonce) : Field.random();
-    
+
     this.issuerCredentials.set(issuerId, {
       privateKey: issuerPrivateKey,
       nonce: issuerNonce,
-      publicId: issuerId
+      publicId: issuerId,
     });
 
     console.log(`🔑 Registered issuer: ${issuerId}`);
@@ -235,11 +243,12 @@ export class ZKPCoreAPI {
         proof,
         claimHash,
         issuerHash,
-        timestamp: Date.now()
+        timestamp: Date.now(),
       };
-
     } catch (error) {
-      throw new Error(`❌ Failed to generate ZK proof: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `❌ Failed to generate ZK proof: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
     }
   }
 
@@ -252,8 +261,11 @@ export class ZKPCoreAPI {
   ): Promise<boolean> {
     try {
       // 1. Verify the proof structure
-      const isValid = await verify(proofData.proof, this.zkProgramInstance.verificationKey);
-      
+      const isValid = await verify(
+        proofData.proof,
+        this.zkProgramInstance.verificationKey
+      );
+
       if (!isValid) {
         console.log(`❌ Invalid proof structure`);
         return false;
@@ -278,9 +290,10 @@ export class ZKPCoreAPI {
 
       console.log(`✅ ZK proof verified successfully offchain`);
       return true;
-
     } catch (error) {
-      console.error(`❌ Offchain verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error(
+        `❌ Offchain verification failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
       return false;
     }
   }
@@ -303,9 +316,10 @@ export class ZKPCoreAPI {
 
       console.log(`✅ Onchain verification successful`);
       return tx.hash;
-
     } catch (error) {
-      throw new Error(`❌ Onchain verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `❌ Onchain verification failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
     }
   }
 
@@ -325,7 +339,7 @@ export class ZKPCoreAPI {
     try {
       // 1. Decrypt the claim
       const didDoc = await decryptDidDoc(encrypted, recipientPrivJwk);
-      
+
       // 2. Validate basic structure
       this.validateDIDDocumentStructure(didDoc);
 
@@ -339,20 +353,27 @@ export class ZKPCoreAPI {
           proofData = await this.generateIssuerProof(didDoc, expectedIssuerId);
           zkVerified = await this.verifyIssuerProofOffchain(proofData);
         } catch (error) {
-          console.warn(`⚠️ Could not generate ZK proof: ${error instanceof Error ? error.message : 'Unknown error'}`);
+          console.warn(
+            `⚠️ Could not generate ZK proof: ${error instanceof Error ? error.message : "Unknown error"}`
+          );
         }
       } else {
         // Verify provided proof
         const claimJson = JSON.stringify(didDoc);
         const claimString = CircuitString.fromString(claimJson);
         const expectedClaimHash = Poseidon.hash(claimString.toFields());
-        
-        zkVerified = await this.verifyIssuerProofOffchain(proofData, expectedClaimHash);
+
+        zkVerified = await this.verifyIssuerProofOffchain(
+          proofData,
+          expectedClaimHash
+        );
       }
 
       // 4. Additional integrity checks
       if (didDoc.issuerId !== expectedIssuerId) {
-        throw new Error(`❌ Issuer ID mismatch. Expected: ${expectedIssuerId}, Got: ${didDoc.issuerId}`);
+        throw new Error(
+          `❌ Issuer ID mismatch. Expected: ${expectedIssuerId}, Got: ${didDoc.issuerId}`
+        );
       }
 
       console.log(`✅ Claim verification complete. ZK verified: ${zkVerified}`);
@@ -360,11 +381,12 @@ export class ZKPCoreAPI {
       return {
         didDocument: didDoc,
         zkVerified,
-        proofData
+        proofData,
       };
-
     } catch (error) {
-      throw new Error(`❌ Claim verification failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw new Error(
+        `❌ Claim verification failed: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
     }
   }
 
@@ -380,7 +402,9 @@ export class ZKPCoreAPI {
       const count = await this.verificationContract.getVerificationCount();
       return { totalVerifications: Number(count.toString()) };
     } catch (error) {
-      console.warn(`⚠️ Could not fetch verification stats: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.warn(
+        `⚠️ Could not fetch verification stats: ${error instanceof Error ? error.message : "Unknown error"}`
+      );
       return { totalVerifications: 0 };
     }
   }
@@ -402,33 +426,37 @@ export class ZKPCoreAPI {
     deployerKey: PublicKey
   ): Promise<IssuerVerificationContract> {
     const contract = new IssuerVerificationContract(deployerKey);
-    
+
     console.log(`🚀 Deploying verification contract...`);
-    
+
     const tx = await contract.deploy({
-      verificationKey: await this.zkProgramInstance.compile().then(r => r.verificationKey)
+      verificationKey: await this.zkProgramInstance
+        .compile()
+        .then((r) => r.verificationKey),
     });
-    
+
     console.log(`✅ Contract deployed: ${deployerKey.toBase58()}`);
-    
+
     this.verificationContract = contract;
     return contract;
   }
 
   // Private helper methods
   private validateDIDDocumentStructure(data: any): void {
-    if (!data || typeof data !== 'object') {
+    if (!data || typeof data !== "object") {
       throw new Error("Invalid DID document: not an object");
     }
 
-    const requiredFields = ['@context', 'id', 'issuerId', 'subjectId'];
+    const requiredFields = ["@context", "id", "issuerId", "subjectId"];
     for (const field of requiredFields) {
       if (!(field in data)) {
-        throw new Error(`Invalid DID document: missing required field '${field}'`);
+        throw new Error(
+          `Invalid DID document: missing required field '${field}'`
+        );
       }
     }
 
-    if (!data.id.startsWith('did:')) {
+    if (!data.id.startsWith("did:")) {
       throw new Error("Invalid DID document: id must start with 'did:'");
     }
   }
@@ -460,7 +488,7 @@ export class ZKPHelper {
     return {
       privateKey,
       nonce,
-      publicId: `issuer-${privateKey.toString().slice(0, 8)}`
+      publicId: `issuer-${privateKey.toString().slice(0, 8)}`,
     };
   }
 
@@ -472,7 +500,7 @@ export class ZKPHelper {
       proof: proofData.proof.toJSON(),
       claimHash: proofData.claimHash.toString(),
       issuerHash: proofData.issuerHash.toString(),
-      timestamp: proofData.timestamp
+      timestamp: proofData.timestamp,
     });
   }
 
@@ -485,24 +513,24 @@ export class ZKPHelper {
       proof: IssuerVerificationProof.fromJSON(data.proof),
       claimHash: Field.from(data.claimHash),
       issuerHash: Field.from(data.issuerHash),
-      timestamp: data.timestamp
+      timestamp: data.timestamp,
     };
   }
 }
 
 /**
  * 🚀 Example Usage:
- * 
+ *
  * // Initialize ZKP system
  * const zkpAPI = new ZKPCoreAPI();
  * await zkpAPI.compileZKProgram();
- * 
+ *
  * // Register issuer
  * await zkpAPI.registerIssuer("university-123", "private-key-seed");
- * 
+ *
  * // Generate proof for claim
  * const proofData = await zkpAPI.generateIssuerProof(didDocument, "university-123");
- * 
+ *
  * // Verify claim with ZKP
  * const result = await zkpAPI.verifyClaimWithZKP(
  *   encryptedClaim,
@@ -510,7 +538,7 @@ export class ZKPHelper {
  *   "university-123",
  *   proofData
  * );
- * 
+ *
  * if (result.zkVerified) {
  *   console.log("✅ Claim authenticity verified with ZKP!");
  * }

@@ -1,11 +1,12 @@
-import * as did from "./did.js";
-import { encryptDidDoc } from "./encrypt.js";
-import { decryptDidDoc } from "./decrypt.js";
+import { getEthereumABI, getFilecoinABI } from "../infra/abi.js";
+import * as did from "../domain/did.js";
+import { encryptDidDoc } from "../infra/encrypt.js";
+import { decryptDidDoc } from "../infra/decrypt.js";
 import {
   makeRecipientKeypair,
   importRecipientPublicKey,
   importRecipientPrivateKey,
-} from "./keys.js";
+} from "../infra/keys.js";
 import type { JWK } from "jose";
 
 interface IPFSResponse {
@@ -58,7 +59,7 @@ class CoreAPI {
   ): Promise<void> {
     try {
       const contract = new this.filecoinProvider.eth.Contract(
-        this.getFilecoinABI(),
+        getFilecoinABI(),
         this.filecoinContract
       );
 
@@ -88,7 +89,7 @@ class CoreAPI {
   async registerDIDOnEthereum(ensName: string): Promise<void> {
     try {
       const contract = new this.web3Provider.eth.Contract(
-        this.getEthereumABI(),
+        getEthereumABI(),
         this.ethereumContract
       );
 
@@ -122,7 +123,7 @@ class CoreAPI {
       // Register on Filecoin
       const did = `did:opendid:${ensName}`;
       const contract = new this.filecoinProvider.eth.Contract(
-        this.getFilecoinABI(),
+        getFilecoinABI(),
         this.filecoinContract
       );
 
@@ -175,7 +176,7 @@ class CoreAPI {
       // 4. Store on Filecoin
       const did = `did:opendid:${ensName}`;
       const contract = new this.filecoinProvider.eth.Contract(
-        this.getFilecoinABI(),
+        getFilecoinABI(),
         this.filecoinContract
       );
 
@@ -207,7 +208,7 @@ class CoreAPI {
       // 1. Get claim CID from Filecoin
       const did = `did:opendid:${ensName}`;
       const contract = new this.filecoinProvider.eth.Contract(
-        this.getFilecoinABI(),
+        getFilecoinABI(),
         this.filecoinContract
       );
 
@@ -255,11 +256,12 @@ class CoreAPI {
     results.forEach((result, index) => {
       if (result.status === "fulfilled") {
         cids.push(result.value);
-      } else {
-        errors.push(
-          `Claim ${index} (${claims[index].credentialType}): ${result.reason}`
-        );
       }
+      // } else {
+      //   errors.push(
+      //     `Claim ${index} (${claims[index].credentialType}): ${result.reason}`
+      //   );
+      // }
     });
 
     if (errors.length > 0) {
@@ -284,7 +286,7 @@ class CoreAPI {
 
   private async generateRegistrationMessage(ensName: string): Promise<string> {
     const contract = new this.web3Provider.eth.Contract(
-      this.getEthereumABI(),
+      getEthereumABI(),
       this.ethereumContract
     );
 
@@ -299,7 +301,7 @@ class CoreAPI {
     credentialType: string
   ): Promise<string> {
     const contract = new this.web3Provider.eth.Contract(
-      this.getEthereumABI(),
+      getEthereumABI(),
       this.ethereumContract
     );
 
@@ -323,7 +325,7 @@ class CoreAPI {
 
     const decrypted = await decryptDidDoc(
       encrypted,
-      this.recipientKeyPair.privJwk
+      this.recipientKeyPair!.privJwk
     );
     this.validateDIDDocument(decrypted);
     return decrypted as did.DIDDocument;
@@ -382,7 +384,7 @@ class CoreAPI {
 
   async checkCredentialExists(credentialType: string): Promise<boolean> {
     const contract = new this.filecoinProvider.eth.Contract(
-      this.getFilecoinABI(),
+      getFilecoinABI(),
       this.filecoinContract
     );
 
@@ -396,14 +398,14 @@ class CoreAPI {
 
     // Check Ethereum
     const ethContract = new this.web3Provider.eth.Contract(
-      this.getEthereumABI(),
+      getEthereumABI(),
       this.ethereumContract
     );
     const ethereumRegistered = await ethContract.methods.hasDID(ensName).call();
 
     // Check Filecoin
     const filContract = new this.filecoinProvider.eth.Contract(
-      this.getFilecoinABI(),
+      getFilecoinABI(),
       this.filecoinContract
     );
     const filecoinRegistered = await filContract.methods
@@ -426,99 +428,6 @@ class CoreAPI {
   // =============================================================================
   // ABI DEFINITIONS (simplified - replace with actual ABIs)
   // =============================================================================
-
-  private getEthereumABI(): any[] {
-    return [
-      {
-        inputs: [{ type: "string", name: "ensName" }],
-        name: "registerDID",
-        outputs: [],
-        type: "function",
-      },
-      {
-        inputs: [
-          { type: "string", name: "ensName" },
-          { type: "string", name: "cid" },
-          { type: "string", name: "credentialType" },
-          { type: "address", name: "filecoinContract" },
-        ],
-        name: "generateClaimMessage",
-        outputs: [{ type: "bytes32", name: "messageHash" }],
-        type: "function",
-      },
-      {
-        inputs: [
-          { type: "string", name: "ensName" },
-          { type: "address", name: "filecoinContract" },
-        ],
-        name: "generateRegistrationMessage",
-        outputs: [{ type: "bytes32", name: "messageHash" }],
-        type: "function",
-      },
-      {
-        inputs: [{ type: "string", name: "ensName" }],
-        name: "hasDID",
-        outputs: [{ type: "bool" }],
-        type: "function",
-      },
-    ];
-  }
-
-  private getFilecoinABI(): any[] {
-    return [
-      {
-        inputs: [
-          { type: "string", name: "credentialType" },
-          { type: "string", name: "description" },
-        ],
-        name: "createCredentialType",
-        outputs: [],
-        type: "function",
-      },
-      {
-        inputs: [
-          { type: "string", name: "did" },
-          { type: "address", name: "expectedEthOwner" },
-          { type: "bytes", name: "sig" },
-        ],
-        name: "registerDID",
-        outputs: [],
-        type: "function",
-      },
-      {
-        inputs: [
-          { type: "string", name: "did" },
-          { type: "string", name: "cid" },
-          { type: "string", name: "credentialType" },
-          { type: "bytes", name: "sig" },
-        ],
-        name: "issueClaim",
-        outputs: [],
-        type: "function",
-      },
-      {
-        inputs: [
-          { type: "string", name: "did" },
-          { type: "string", name: "credentialType" },
-        ],
-        name: "getClaim",
-        outputs: [{ type: "string", name: "cid" }],
-        type: "function",
-      },
-      {
-        inputs: [{ type: "string", name: "credentialType" }],
-        name: "credentialExists",
-        outputs: [{ type: "bool" }],
-        type: "function",
-      },
-      {
-        inputs: [{ type: "string", name: "did" }],
-        name: "isDIDRegistered",
-        outputs: [{ type: "bool" }],
-        type: "function",
-      },
-    ];
-  }
 }
 
 export default CoreAPI;
