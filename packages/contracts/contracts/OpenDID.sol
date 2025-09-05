@@ -114,11 +114,13 @@ contract OpenDID {
      * @dev Generate a signed message for adding a claim to Filecoin
      * @param ensName The ENS name
      * @param cid The CID of the claim data on IPFS/Filecoin
+     * @param claimType The type of claim (e.g., "ghana-card", "ghana-passport")
      * @return messageHash The hash that needs to be signed
      */
     function generateClaimMessage(
         string calldata ensName,
-        string calldata cid
+        string calldata cid,
+        string calldata claimType
     ) external view returns (bytes32 messageHash) {
         if (bytes(ensName).length == 0) revert EmptyENSName();
 
@@ -144,6 +146,7 @@ contract OpenDID {
                 "Append",
                 did,
                 cid,
+                claimType,
                 FILECOIN_CONTRACT,
                 nonces[msg.sender]
             )
