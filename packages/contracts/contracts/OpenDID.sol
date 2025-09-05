@@ -148,7 +148,6 @@ contract OpenDID {
                 nonces[msg.sender]
             )
         );
-
         return messageHash;
     }
 
